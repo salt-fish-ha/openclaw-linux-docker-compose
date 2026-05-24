@@ -1,0 +1,88 @@
+# 定义通用的日志配置模板，避免重复编写
+x-logging: &default-logging
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"   # 每个日志文件最大 10MB
+      max-file: "3"     # 最多保留 3 个日志文件（旧的会被自动清理）
+
+services:
+  openclaw-gateway:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: openclaw-gateway
+    restart: unless-stopped
+    expose:
+      - "18789"
+    volumes:
+      - /root/openclaw-docker/data:/home/node/.openclaw
+      - /root/openclaw-docker/workspace:/home/node/.openclaw/workspace
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      # 网关安全校验降级
+      #- GATEWAY_CONTROLUI_ALLOWINSECUREAUTH=true
+      # 跳过访问来源验证
+      #- GATEWAY_CONTROLUI_SKIPORIGINCHECK=true
+      # 跳过设备校验
+      #- GATEWAY_CONTROLUI_SKIPDEVICECHECK=true
+      # OpenClaw 网关的环境配置变量
+      - OPENCLAW_GATEWAY_BIND=lan
+    # --- 健康检查 ---
+    healthcheck:
+      test: [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ] # OpenClaw 开放的监控端口
+      interval: 30s   # 每 10 秒检查一次
+      timeout: 5s     # 超时时间
+      retries: 5      # 重试 3 次失败才算不健康
+      start_period: 20s # 容器启动后的前 10 秒即使失败也不计入重试
+    # --- 硬件资源限制 ---
+    mem_limit: 2g
+    cpus: 2
+    # --- 日志限制 ---
+    <<: *default-logging
+
+  openclaw-cli:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: openclaw-cli
+    network_mode: "service:openclaw-gateway"
+    volumes:
+      - /root/openclaw-docker/data:/home/node/.openclaw
+      - /root/openclaw-docker/workspace:/home/node/.openclaw/workspace
+    entrypoint: ["node", "dist/index.js"]
+    command: ["onboard", "--mode", "local", "--no-install-daemon"]
+    stdin_open: true
+    tty: true
+    init: true
+    profiles:
+      - tools
+    # --- 日志限制 ---
+    <<: *default-logging
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - /root/openclaw-docker/caddyfile:/etc/caddy/Caddyfile
+      - /root/openclaw-docker/caddy_data:/data
+      - /root/openclaw-docker/caddy_config:/config
+      # 映射 Caddy 自身的访问日志目录
+      - /root/openclaw-docker/caddy_logs:/var/log/caddy
+    # --- 依赖关系：必须等 openclaw-gateway 处于 healthy (健康) 状态才启动 ---
+    depends_on:
+      openclaw-gateway:
+        condition: service_healthy
+    # --- 硬件资源限制 ---
+    mem_limit: 512m
+    cpus: 0.5
+    # --- 日志限制 ---
+    <<: *default-logging
